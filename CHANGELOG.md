@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.1.3
+## 1.0.0
 
+- First stable release of OddsPapi Sports Odds for Home Assistant.
 - Improved team search without hiding similar participants.
 - Added clearer dropdown labels with participant ID, tournament and category when upcoming fixture metadata is available.
 - Added provider-derived labels for Women, U23/U21/U20/U19/U18/U17/U16 and reserve teams when that information is present in the participant or tournament text.
