@@ -42,28 +42,42 @@ The UI setup lets you:
 - choose a refresh profile
 - search for football clubs and national teams
 - see the OddsPapi participant ID for every search result
-- see extra team context such as competition, country/category, Women, U21, U19, etc. when OddsPapi has upcoming fixture metadata available
+- distinguish duplicate team names using tournament, country/category and team type when OddsPapi exposes that information
+- see whether an ambiguous participant has an upcoming fixture with odds from the selected bookmaker
 - follow up to 10 teams
 
-Search results are not filtered out just because several teams have similar names. The integration keeps the available matches and tries to make them easier to distinguish.
+Search results are **not filtered out** just because several participants have similar or identical names. The integration keeps the matches and adds context so you can decide which one is correct.
 
 ## Finding the right team
 
 OddsPapi identifies every club and national team with a unique **participant ID**.
 
-You normally do **not** need to find this ID manually. Search for the team by name during setup and select the correct result from the dropdown.
+You normally do **not** need to find this ID manually. Search for the team by name during setup or through **Configure → Add team**, then select the correct result from the dropdown.
 
-The integration always shows the participant ID and, when possible, enriches the result with metadata from an upcoming fixture.
+### Duplicate names are enriched before selection
 
-Examples may look like:
+Some OddsPapi participants have exactly the same displayed name. This can make a search such as `Bodø/Glimt` return several almost identical rows.
+
+From version **1.0.1**, the integration detects duplicate normalized names and performs targeted fixture lookups **before the dropdown is shown**. When OddsPapi exposes enough metadata, a result can look like:
 
 ```text
-Manchester United — Premier League, England (ID 35)
-Norway — UEFA competition, International (ID 4475)
-Bodø/Glimt — Eliteserien, Norway (ID 656)
-Example FC [Women] — Women's competition, Norway (ID ...)
-Example FC U21 — U21 competition, England (ID ...)
+Bodø/Glimt — Eliteserien, Norway, Pinnacle odds ✓ (ID 656)
+Bodø/Glimt [Women] — Toppserien, Norway, no upcoming Pinnacle odds found (ID ...)
+Bodø/Glimt [U21] — U21 competition, Norway, no upcoming Pinnacle odds found (ID ...)
+Bodø/Glimt SRL (ID ...)
 ```
+
+The exact text depends on the metadata OddsPapi returns for that participant.
+
+The integration can derive labels such as:
+
+- `Women`
+- `U23`, `U21`, `U20`, `U19`, `U18`, `U17`, `U16`
+- `Youth`
+- `Reserves`
+- `SRL`
+
+If no useful upcoming fixture metadata is available, the participant is still shown with its raw OddsPapi name and ID instead of being hidden or guessed.
 
 Known participant IDs used while testing this integration:
 
@@ -75,28 +89,20 @@ Known participant IDs used while testing this integration:
 
 ### Why can several similar teams appear?
 
-OddsPapi can contain multiple participants with similar club or country names, for example:
+OddsPapi can contain multiple participants with similar club or country names, including senior teams, women's teams, youth teams, reserve teams, SRL/simulated participants, and other provider-specific participants.
 
-- senior team
-- women's team
-- U23 / U21 / U20 / U19 / other youth teams
-- reserve teams
-- other provider-specific participants with a similar name
+The integration intentionally keeps these results. It uses the OddsPapi fixture metadata only to make the dropdown easier to understand.
 
-The integration intentionally does **not** hide those results. Instead it:
+### Search enrichment and API quota
 
-1. puts the closest name match first
-2. keeps the original OddsPapi participant ID visible
-3. uses upcoming fixture metadata to show tournament/category context when available
-4. adds a `Women`, `U21`, `U19`, etc. label when that information can be derived from the participant or tournament name
+Team-search enrichment is designed for small API plans:
 
-If OddsPapi has no upcoming fixture metadata for a participant, the result falls back to:
+- unique-name search results do not trigger extra fixture enrichment lookups
+- targeted enrichment is only used for duplicate normalized names
+- results are cached while the current setup/options flow is open
+- enrichment is capped at **8 fixture requests per config/options flow**
 
-```text
-Team name (ID 1234)
-```
-
-This avoids guessing.
+This prevents a search that returns many participants from creating one API request for every result.
 
 ### Searching with special characters
 
@@ -166,9 +172,7 @@ Available profiles:
 | Balanced | 3 h | 12 h | 48 h |
 | Frequent | 1 h | 6 h | 24 h |
 
-The integration also uses one shared short fixture-window lookup where possible before falling back to participant-specific discovery.
-
-Team-search enrichment also uses a shared fixture lookup for the setup session instead of making one request per search result.
+The normal coordinator also uses one shared short fixture-window lookup where possible before falling back to participant-specific discovery.
 
 ## Fair win probability
 
@@ -217,7 +221,7 @@ If HACS says the repository structure is not compliant, verify that `custom_comp
 
 If **Add Integration** does not find OddsPapi, make sure HACS finished installing the custom component and restart Home Assistant first.
 
-If several similar team names appear, use the displayed tournament/category and participant ID to identify the correct participant. When no context is available, the integration deliberately shows the raw OddsPapi name and ID instead of guessing.
+If several identical team names appear, version 1.0.1 attempts to enrich those duplicate rows before selection. If a participant still only shows its raw name and ID, OddsPapi did not expose enough usable upcoming fixture metadata for that participant during the lookup.
 
 ## Security
 
@@ -225,7 +229,7 @@ The API key is entered through Home Assistant's config flow. Do not commit API k
 
 ## Version
 
-Current stable version: **1.0.0**
+Current version: **1.0.1**
 
 ## License
 
