@@ -1,0 +1,12 @@
+{
+  "domain": "oddspapi",
+  "name": "OddsPapi Sports Odds",
+  "version": "0.1.2",
+  "config_flow": true,
+  "documentation": "https://github.com/Wesc-9/Oddspapi_HA",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "requirements": [],
+  "issue_tracker": "https://github.com/Wesc-9/Oddspapi_HA/issues",
+  "codeowners": ["@Wesc-9"]
+}
