@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 import hashlib
 import re
 from typing import Any
@@ -30,11 +30,12 @@ from .const import (
     DEFAULT_BOOKMAKER,
     DEFAULT_PROFILE,
     DOMAIN,
-    FIXTURE_WINDOW_DAYS,
     MAX_TEAMS,
     PROFILES,
 )
-from .helpers import active_subscription
+from .helpers import active_subscription, select_next_fixture
+
+MAX_SEARCH_ENRICHMENT_CALLS = 8
 
 
 def _bookmakers(account: dict[str, Any]) -> list[str]:
@@ -75,9 +76,24 @@ def _match_sort_key(search: str, name: str) -> tuple[int, int, int, str]:
     )
 
 
-def _build_participant_context(fixtures: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
+def _ambiguous_participant_ids(matches: list[tuple[str, str]]) -> list[str]:
+    """Return IDs whose normalized participant name appears more than once."""
+    counts: dict[str, int] = {}
+    for _participant_id, name in matches:
+        key = _search_key(name)
+        counts[key] = counts.get(key, 0) + 1
+    return [
+        participant_id
+        for participant_id, name in matches
+        if counts.get(_search_key(name), 0) > 1
+    ]
+
+
+def _build_participant_context(
+    fixtures: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
     """Build lightweight display context from the next known fixture."""
-    context: dict[str, dict[str, str]] = {}
+    context: dict[str, dict[str, Any]] = {}
     for fixture in sorted(fixtures, key=lambda item: str(item.get("startTime") or "")):
         tournament = str(fixture.get("tournamentName") or "").strip()
         category = str(fixture.get("categoryName") or "").strip()
@@ -85,7 +101,9 @@ def _build_participant_context(fixtures: list[dict[str, Any]]) -> dict[str, dict
             participant_id = str(fixture.get(f"participant{side}Id") or "").strip()
             if not participant_id or participant_id in context:
                 continue
-            participant_name = str(fixture.get(f"participant{side}Name") or "").strip()
+            participant_name = str(
+                fixture.get(f"participant{side}Name") or ""
+            ).strip()
             context[participant_id] = {
                 "name": participant_name,
                 "tournament": tournament,
@@ -94,9 +112,9 @@ def _build_participant_context(fixtures: list[dict[str, Any]]) -> dict[str, dict
     return context
 
 
-def _team_type(name: str, tournament: str) -> str | None:
+def _team_type(name: str, tournament: str, category: str = "") -> str | None:
     """Infer a useful youth/women/reserve label from provider text only."""
-    combined = f"{name} {tournament}".casefold().replace("-", " ")
+    combined = f"{name} {tournament} {category}".casefold().replace("-", " ")
 
     if re.search(r"\b(?:women|womens|women's|ladies|female)\b", combined):
         return "Women"
@@ -105,8 +123,14 @@ def _team_type(name: str, tournament: str) -> str | None:
         if re.search(rf"\b(?:u\s*{age}|under\s*{age})\b", combined):
             return f"U{age}"
 
+    if re.search(r"\byouth\b", combined):
+        return "Youth"
+
     if re.search(r"\breserves?\b", combined):
         return "Reserves"
+
+    if re.search(r"\b(?:srl|simulated reality)\b", combined):
+        return "SRL"
 
     return None
 
@@ -114,16 +138,19 @@ def _team_type(name: str, tournament: str) -> str | None:
 def _participant_label(
     participant_id: str,
     name: str,
-    context: dict[str, dict[str, str]],
+    context: dict[str, dict[str, Any]],
 ) -> str:
     """Return a descriptive dropdown label without filtering any participant."""
     details = context.get(str(participant_id), {})
-    display_name = details.get("name") or name
-    tournament = details.get("tournament") or ""
-    category = details.get("category") or ""
+    display_name = str(details.get("name") or name)
+    tournament = str(details.get("tournament") or "")
+    category = str(details.get("category") or "")
+    bookmaker = str(details.get("bookmaker") or "")
+    bookmaker_odds = details.get("bookmaker_odds")
+    lookup_status = str(details.get("lookup_status") or "")
 
-    team_type = _team_type(display_name, tournament)
-    if team_type and _team_type(display_name, "") != team_type:
+    team_type = _team_type(display_name, tournament, category)
+    if team_type and _team_type(display_name, "", "") != team_type:
         display_name = f"{display_name} [{team_type}]"
 
     context_parts: list[str] = []
@@ -132,9 +159,119 @@ def _participant_label(
     if category and category.casefold() not in tournament.casefold():
         context_parts.append(category)
 
+    if bookmaker and bookmaker_odds is True:
+        context_parts.append(f"{bookmaker.title()} odds ✓")
+    elif bookmaker and bookmaker_odds is False:
+        context_parts.append(f"no upcoming {bookmaker.title()} odds found")
+    elif lookup_status == "no_fixture":
+        context_parts.append("no upcoming fixture found")
+
     if context_parts:
         return f"{display_name} — {', '.join(context_parts)} (ID {participant_id})"
     return f"{display_name} (ID {participant_id})"
+
+
+async def _async_enrich_ambiguous_matches(
+    api: OddsPapiApi,
+    matches: list[tuple[str, str]],
+    bookmaker: str,
+    context: dict[str, dict[str, Any]],
+    checked: set[str],
+    calls_used: int,
+) -> int:
+    """Enrich only duplicate-name results and cap API usage per config flow."""
+    if calls_used >= MAX_SEARCH_ENRICHMENT_CALLS:
+        return calls_used
+
+    match_names = dict(matches)
+    ambiguous_ids = _ambiguous_participant_ids(matches)
+    now = datetime.now(UTC)
+
+    for participant_id in ambiguous_ids:
+        if participant_id in checked:
+            continue
+        if calls_used >= MAX_SEARCH_ENRICHMENT_CALLS:
+            break
+
+        checked.add(participant_id)
+        fallback_name = match_names.get(participant_id, participant_id)
+
+        bookmaker_fixtures: list[dict[str, Any]] = []
+        try:
+            bookmaker_fixtures = await api.async_get_participant_fixtures(
+                int(participant_id),
+                now,
+                bookmaker=bookmaker,
+            )
+            calls_used += 1
+        except (OddsPapiError, OddsPapiQuotaError, ValueError):
+            context[participant_id] = {
+                "name": fallback_name,
+                "lookup_status": "unavailable",
+            }
+            continue
+
+        fixture = select_next_fixture(bookmaker_fixtures, int(participant_id))
+        if fixture is not None:
+            details = _build_participant_context([fixture]).get(
+                participant_id,
+                {"name": fallback_name},
+            )
+            details.update(
+                {
+                    "bookmaker": bookmaker,
+                    "bookmaker_odds": True,
+                    "lookup_status": "ok",
+                }
+            )
+            context[participant_id] = details
+            continue
+
+        if calls_used >= MAX_SEARCH_ENRICHMENT_CALLS:
+            context[participant_id] = {
+                "name": fallback_name,
+                "bookmaker": bookmaker,
+                "bookmaker_odds": False,
+                "lookup_status": "bookmaker_only",
+            }
+            continue
+
+        try:
+            all_fixtures = await api.async_get_participant_fixtures(
+                int(participant_id),
+                now,
+            )
+            calls_used += 1
+        except (OddsPapiError, OddsPapiQuotaError, ValueError):
+            context[participant_id] = {
+                "name": fallback_name,
+                "bookmaker": bookmaker,
+                "bookmaker_odds": False,
+                "lookup_status": "unavailable",
+            }
+            continue
+
+        fixture = select_next_fixture(all_fixtures, int(participant_id))
+        if fixture is not None:
+            details = _build_participant_context([fixture]).get(
+                participant_id,
+                {"name": fallback_name},
+            )
+            details.update(
+                {
+                    "bookmaker": bookmaker,
+                    "bookmaker_odds": False,
+                    "lookup_status": "ok",
+                }
+            )
+            context[participant_id] = details
+        else:
+            context[participant_id] = {
+                "name": fallback_name,
+                "lookup_status": "no_fixture",
+            }
+
+    return calls_used
 
 
 class OddsPapiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -147,17 +284,23 @@ class OddsPapiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._bookmaker = DEFAULT_BOOKMAKER
         self._profile = DEFAULT_PROFILE
         self._participants: dict[str, str] | None = None
-        self._participant_context: dict[str, dict[str, str]] = {}
-        self._context_loaded = False
+        self._participant_context: dict[str, dict[str, Any]] = {}
+        self._enriched_participants: set[str] = set()
+        self._enrichment_calls = 0
         self._selected: list[dict[str, Any]] = []
         self._matches: list[tuple[str, str]] = []
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> "OddsPapiOptionsFlow":
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> "OddsPapiOptionsFlow":
         return OddsPapiOptionsFlow()
 
-    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_user(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             api_key = user_input[CONF_API_KEY].strip()
@@ -173,52 +316,88 @@ class OddsPapiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._api = api
                 self._account = account
                 subscription = active_subscription(account)
-                unique_source = str(subscription.get("subscription_id") or account.get("current_subscription_id") or hashlib.sha256(api_key.encode()).hexdigest()[:16])
+                unique_source = str(
+                    subscription.get("subscription_id")
+                    or account.get("current_subscription_id")
+                    or hashlib.sha256(api_key.encode()).hexdigest()[:16]
+                )
                 await self.async_set_unique_id(unique_source)
                 self._abort_if_unique_id_configured()
                 return await self.async_step_settings()
 
-        schema = vol.Schema({vol.Required(CONF_API_KEY): selector.TextSelector(selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD))})
-        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_API_KEY): selector.TextSelector(
+                    selector.TextSelectorConfig(
+                        type=selector.TextSelectorType.PASSWORD
+                    )
+                )
+            }
+        )
+        return self.async_show_form(
+            step_id="user",
+            data_schema=schema,
+            errors=errors,
+        )
 
-    async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_settings(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         if user_input is not None:
             self._bookmaker = user_input[CONF_BOOKMAKER]
             self._profile = user_input[CONF_PROFILE]
             return await self.async_step_team_search()
 
         books = _bookmakers(self._account)
-        bookmaker_options = [selector.SelectOptionDict(value=value, label=value.title()) for value in books]
-        schema = vol.Schema({
-            vol.Required(CONF_BOOKMAKER, default=DEFAULT_BOOKMAKER if DEFAULT_BOOKMAKER in books else books[0]): selector.SelectSelector(selector.SelectSelectorConfig(options=bookmaker_options, mode=selector.SelectSelectorMode.DROPDOWN)),
-            vol.Required(CONF_PROFILE, default=DEFAULT_PROFILE): selector.SelectSelector(selector.SelectSelectorConfig(options=list(PROFILES), mode=selector.SelectSelectorMode.DROPDOWN, translation_key="refresh_profile")),
-        })
+        bookmaker_options = [
+            selector.SelectOptionDict(value=value, label=value.title())
+            for value in books
+        ]
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_BOOKMAKER,
+                    default=(
+                        DEFAULT_BOOKMAKER
+                        if DEFAULT_BOOKMAKER in books
+                        else books[0]
+                    ),
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=bookmaker_options,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_PROFILE,
+                    default=DEFAULT_PROFILE,
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(PROFILES),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                        translation_key="refresh_profile",
+                    )
+                ),
+            }
+        )
         return self.async_show_form(step_id="settings", data_schema=schema)
 
     async def _async_load_participants(self) -> bool:
         assert self._api is not None
-        if self._participants is None:
-            try:
-                self._participants = await self._api.async_get_participants()
-            except (OddsPapiError, OddsPapiQuotaError):
-                return False
+        if self._participants is not None:
+            return True
 
-        if not self._context_loaded:
-            self._context_loaded = True
-            now = datetime.now(UTC)
-            try:
-                fixtures = await self._api.async_get_fixture_window(
-                    now,
-                    now + timedelta(days=FIXTURE_WINDOW_DAYS),
-                )
-            except OddsPapiError:
-                pass
-            else:
-                self._participant_context = _build_participant_context(fixtures)
-
+        try:
+            self._participants = await self._api.async_get_participants()
+        except (OddsPapiError, OddsPapiQuotaError):
+            return False
         return True
 
-    async def async_step_team_search(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_team_search(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if not await self._async_load_participants():
             errors["base"] = "participants_failed"
@@ -229,50 +408,120 @@ class OddsPapiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "select_team"
                 else:
                     assert self._api_key is not None
-                    return self.async_create_entry(title="OddsPapi Sports Odds", data={CONF_API_KEY: self._api_key, CONF_BOOKMAKER: self._bookmaker, CONF_PROFILE: self._profile, CONF_TEAMS: self._selected})
+                    return self.async_create_entry(
+                        title="OddsPapi Sports Odds",
+                        data={
+                            CONF_API_KEY: self._api_key,
+                            CONF_BOOKMAKER: self._bookmaker,
+                            CONF_PROFILE: self._profile,
+                            CONF_TEAMS: self._selected,
+                        },
+                    )
             else:
-                search = _search_key(str(user_input.get(CONF_SEARCH, "")).strip())
+                search = _search_key(
+                    str(user_input.get(CONF_SEARCH, "")).strip()
+                )
                 if not search:
                     errors[CONF_SEARCH] = "search_required"
                 else:
-                    selected_ids = {str(team["id"]) for team in self._selected}
+                    selected_ids = {
+                        str(team["id"]) for team in self._selected
+                    }
                     matches = [
                         (participant_id, name)
-                        for participant_id, name in (self._participants or {}).items()
-                        if search in _search_key(name) and participant_id not in selected_ids
+                        for participant_id, name in (
+                            self._participants or {}
+                        ).items()
+                        if search in _search_key(name)
+                        and participant_id not in selected_ids
                     ]
-                    matches.sort(key=lambda item: _match_sort_key(search, item[1]))
+                    matches.sort(
+                        key=lambda item: _match_sort_key(search, item[1])
+                    )
                     self._matches = matches[:50]
                     if not self._matches:
                         errors["base"] = "no_match"
                     else:
+                        assert self._api is not None
+                        self._enrichment_calls = (
+                            await _async_enrich_ambiguous_matches(
+                                self._api,
+                                self._matches,
+                                self._bookmaker,
+                                self._participant_context,
+                                self._enriched_participants,
+                                self._enrichment_calls,
+                            )
+                        )
                         return await self.async_step_team_pick()
 
-        selected = ", ".join(team["name"] for team in self._selected) or "—"
-        schema = vol.Schema({vol.Optional(CONF_SEARCH, default=""): str, vol.Optional("finish", default=False): bool})
-        return self.async_show_form(step_id="team_search", data_schema=schema, errors=errors, description_placeholders={"selected": selected, "max_teams": str(MAX_TEAMS)})
+        selected = (
+            ", ".join(team["name"] for team in self._selected) or "—"
+        )
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_SEARCH, default=""): str,
+                vol.Optional("finish", default=False): bool,
+            }
+        )
+        return self.async_show_form(
+            step_id="team_search",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "selected": selected,
+                "max_teams": str(MAX_TEAMS),
+            },
+        )
 
-    async def async_step_team_pick(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_team_pick(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         if user_input is not None:
             participant_id = str(user_input[CONF_TEAM])
             name = dict(self._matches)[participant_id]
             if len(self._selected) < MAX_TEAMS:
-                self._selected.append({"id": int(participant_id), "name": name})
+                self._selected.append(
+                    {"id": int(participant_id), "name": name}
+                )
             return await self.async_step_team_search()
 
         options = [
             selector.SelectOptionDict(
                 value=participant_id,
-                label=_participant_label(participant_id, name, self._participant_context),
+                label=_participant_label(
+                    participant_id,
+                    name,
+                    self._participant_context,
+                ),
             )
             for participant_id, name in self._matches
         ]
-        return self.async_show_form(step_id="team_pick", data_schema=vol.Schema({vol.Required(CONF_TEAM): selector.SelectSelector(selector.SelectSelectorConfig(options=options, mode=selector.SelectSelectorMode.DROPDOWN))}))
+        return self.async_show_form(
+            step_id="team_pick",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TEAM): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+        )
 
-    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+    async def async_step_reauth(
+        self,
+        entry_data: dict[str, Any],
+    ) -> ConfigFlowResult:
         return await self.async_step_reauth_confirm()
 
-    async def async_step_reauth_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_reauth_confirm(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
             api_key = user_input[CONF_API_KEY].strip()
@@ -284,28 +533,70 @@ class OddsPapiConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except OddsPapiError:
                 errors["base"] = "cannot_connect"
             else:
-                entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+                entry = self.hass.config_entries.async_get_entry(
+                    self.context["entry_id"]
+                )
                 assert entry is not None
-                return self.async_update_reload_and_abort(entry, data_updates={CONF_API_KEY: api_key})
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data_updates={CONF_API_KEY: api_key},
+                )
 
-        return self.async_show_form(step_id="reauth_confirm", data_schema=vol.Schema({vol.Required(CONF_API_KEY): selector.TextSelector(selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD))}), errors=errors)
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_API_KEY): selector.TextSelector(
+                        selector.TextSelectorConfig(
+                            type=selector.TextSelectorType.PASSWORD
+                        )
+                    )
+                }
+            ),
+            errors=errors,
+        )
 
 
 class OddsPapiOptionsFlow(OptionsFlowWithReload):
     def __init__(self) -> None:
+        self._api: OddsPapiApi | None = None
         self._participants: dict[str, str] | None = None
-        self._participant_context: dict[str, dict[str, str]] = {}
-        self._context_loaded = False
+        self._participant_context: dict[str, dict[str, Any]] = {}
+        self._enriched_participants: set[str] = set()
+        self._enrichment_calls = 0
         self._matches: list[tuple[str, str]] = []
 
     def _options(self) -> dict[str, Any]:
         options = deepcopy(dict(self.config_entry.options))
-        options.setdefault(CONF_BOOKMAKER, self.config_entry.data.get(CONF_BOOKMAKER, DEFAULT_BOOKMAKER))
-        options.setdefault(CONF_PROFILE, self.config_entry.data.get(CONF_PROFILE, DEFAULT_PROFILE))
-        options.setdefault(CONF_TEAMS, _team_list(self.config_entry))
+        options.setdefault(
+            CONF_BOOKMAKER,
+            self.config_entry.data.get(
+                CONF_BOOKMAKER,
+                DEFAULT_BOOKMAKER,
+            ),
+        )
+        options.setdefault(
+            CONF_PROFILE,
+            self.config_entry.data.get(CONF_PROFILE, DEFAULT_PROFILE),
+        )
+        options.setdefault(
+            CONF_TEAMS,
+            _team_list(self.config_entry),
+        )
         return options
 
-    async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    def _get_api(self) -> OddsPapiApi:
+        if self._api is None:
+            self._api = OddsPapiApi(
+                async_get_clientsession(self.hass),
+                self.config_entry.data[CONF_API_KEY],
+            )
+        return self._api
+
+    async def async_step_init(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         if user_input is not None:
             action = user_input[CONF_ACTION]
             if action == "settings":
@@ -313,12 +604,33 @@ class OddsPapiOptionsFlow(OptionsFlowWithReload):
             if action == "add_team":
                 return await self.async_step_add_team()
             return await self.async_step_remove_team()
-        return self.async_show_form(step_id="init", data_schema=vol.Schema({vol.Required(CONF_ACTION): selector.SelectSelector(selector.SelectSelectorConfig(options=["settings", "add_team", "remove_team"], mode=selector.SelectSelectorMode.LIST, translation_key="options_action"))}))
 
-    async def async_step_settings(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ACTION): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                "settings",
+                                "add_team",
+                                "remove_team",
+                            ],
+                            mode=selector.SelectSelectorMode.LIST,
+                            translation_key="options_action",
+                        )
+                    )
+                }
+            ),
+        )
+
+    async def async_step_settings(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         options = self._options()
         errors: dict[str, str] = {}
-        api = OddsPapiApi(async_get_clientsession(self.hass), self.config_entry.data[CONF_API_KEY])
+        api = self._get_api()
         try:
             account = await api.async_get_account()
             bookmaker_values = _bookmakers(account)
@@ -330,59 +642,106 @@ class OddsPapiOptionsFlow(OptionsFlowWithReload):
             options.update(user_input)
             return self.async_create_entry(data=options)
 
-        schema = vol.Schema({
-            vol.Required(CONF_BOOKMAKER, default=options[CONF_BOOKMAKER]): selector.SelectSelector(selector.SelectSelectorConfig(options=[selector.SelectOptionDict(value=value, label=value.title()) for value in bookmaker_values], mode=selector.SelectSelectorMode.DROPDOWN)),
-            vol.Required(CONF_PROFILE, default=options[CONF_PROFILE]): selector.SelectSelector(selector.SelectSelectorConfig(options=list(PROFILES), mode=selector.SelectSelectorMode.DROPDOWN, translation_key="refresh_profile")),
-        })
-        return self.async_show_form(step_id="settings", data_schema=schema, errors=errors)
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_BOOKMAKER,
+                    default=options[CONF_BOOKMAKER],
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(
+                                value=value,
+                                label=value.title(),
+                            )
+                            for value in bookmaker_values
+                        ],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_PROFILE,
+                    default=options[CONF_PROFILE],
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(PROFILES),
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                        translation_key="refresh_profile",
+                    )
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="settings",
+            data_schema=schema,
+            errors=errors,
+        )
 
     async def _async_participants(self) -> bool:
-        api = OddsPapiApi(async_get_clientsession(self.hass), self.config_entry.data[CONF_API_KEY])
-        if self._participants is None:
-            try:
-                self._participants = await api.async_get_participants()
-            except OddsPapiError:
-                return False
+        if self._participants is not None:
+            return True
 
-        if not self._context_loaded:
-            self._context_loaded = True
-            now = datetime.now(UTC)
-            try:
-                fixtures = await api.async_get_fixture_window(
-                    now,
-                    now + timedelta(days=FIXTURE_WINDOW_DAYS),
-                )
-            except OddsPapiError:
-                pass
-            else:
-                self._participant_context = _build_participant_context(fixtures)
-
+        try:
+            self._participants = await self._get_api().async_get_participants()
+        except (OddsPapiError, OddsPapiQuotaError):
+            return False
         return True
 
-    async def async_step_add_team(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_add_team(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if not await self._async_participants():
             errors["base"] = "participants_failed"
+
         teams = _team_list(self.config_entry)
         if len(teams) >= MAX_TEAMS:
             return self.async_abort(reason="max_teams")
+
         if user_input is not None and not errors:
             search = _search_key(str(user_input[CONF_SEARCH]).strip())
             existing = {str(team["id"]) for team in teams}
             matches = [
                 (participant_id, name)
-                for participant_id, name in (self._participants or {}).items()
-                if search in _search_key(name) and participant_id not in existing
+                for participant_id, name in (
+                    self._participants or {}
+                ).items()
+                if search in _search_key(name)
+                and participant_id not in existing
             ]
             matches.sort(key=lambda item: _match_sort_key(search, item[1]))
             self._matches = matches[:50]
+
             if not self._matches:
                 errors["base"] = "no_match"
             else:
+                options = self._options()
+                bookmaker = str(
+                    options.get(CONF_BOOKMAKER, DEFAULT_BOOKMAKER)
+                )
+                self._enrichment_calls = (
+                    await _async_enrich_ambiguous_matches(
+                        self._get_api(),
+                        self._matches,
+                        bookmaker,
+                        self._participant_context,
+                        self._enriched_participants,
+                        self._enrichment_calls,
+                    )
+                )
                 return await self.async_step_add_team_pick()
-        return self.async_show_form(step_id="add_team", data_schema=vol.Schema({vol.Required(CONF_SEARCH): str}), errors=errors)
 
-    async def async_step_add_team_pick(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id="add_team",
+            data_schema=vol.Schema({vol.Required(CONF_SEARCH): str}),
+            errors=errors,
+        )
+
+    async def async_step_add_team_pick(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         if user_input is not None:
             participant_id = str(user_input[CONF_TEAM])
             name = dict(self._matches)[participant_id]
@@ -391,26 +750,78 @@ class OddsPapiOptionsFlow(OptionsFlowWithReload):
             teams.append({"id": int(participant_id), "name": name})
             options[CONF_TEAMS] = teams
             return self.async_create_entry(data=options)
+
         choices = [
             selector.SelectOptionDict(
-                value=pid,
-                label=_participant_label(pid, name, self._participant_context),
+                value=participant_id,
+                label=_participant_label(
+                    participant_id,
+                    name,
+                    self._participant_context,
+                ),
             )
-            for pid, name in self._matches
+            for participant_id, name in self._matches
         ]
-        return self.async_show_form(step_id="add_team_pick", data_schema=vol.Schema({vol.Required(CONF_TEAM): selector.SelectSelector(selector.SelectSelectorConfig(options=choices, mode=selector.SelectSelectorMode.DROPDOWN))}))
+        return self.async_show_form(
+            step_id="add_team_pick",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TEAM): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=choices,
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    )
+                }
+            ),
+        )
 
-    async def async_step_remove_team(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+    async def async_step_remove_team(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
         teams = _team_list(self.config_entry)
         if not teams:
             return self.async_abort(reason="no_teams")
-        mapping = {str(team["id"]): team["name"] for team in teams}
+
+        mapping = {
+            str(team["id"]): team["name"]
+            for team in teams
+        }
         if user_input is not None:
-            remove = {str(item) for item in user_input[CONF_REMOVE_TEAMS]}
-            remaining = [team for team in teams if str(team["id"]) not in remove]
+            remove = {
+                str(item)
+                for item in user_input[CONF_REMOVE_TEAMS]
+            }
+            remaining = [
+                team
+                for team in teams
+                if str(team["id"]) not in remove
+            ]
             if not remaining:
-                return self.async_show_form(step_id="remove_team", data_schema=vol.Schema({vol.Required(CONF_REMOVE_TEAMS): cv.multi_select(mapping)}), errors={"base": "keep_one_team"})
+                return self.async_show_form(
+                    step_id="remove_team",
+                    data_schema=vol.Schema(
+                        {
+                            vol.Required(
+                                CONF_REMOVE_TEAMS
+                            ): cv.multi_select(mapping)
+                        }
+                    ),
+                    errors={"base": "keep_one_team"},
+                )
+
             options = self._options()
             options[CONF_TEAMS] = remaining
             return self.async_create_entry(data=options)
-        return self.async_show_form(step_id="remove_team", data_schema=vol.Schema({vol.Required(CONF_REMOVE_TEAMS): cv.multi_select(mapping)}))
+
+        return self.async_show_form(
+            step_id="remove_team",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_REMOVE_TEAMS
+                    ): cv.multi_select(mapping)
+                }
+            ),
+        )
