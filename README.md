@@ -41,7 +41,102 @@ The UI setup lets you:
 - choose a bookmaker
 - choose a refresh profile
 - search for football clubs and national teams
+- see the OddsPapi participant ID for every search result
+- see extra team context such as competition, country/category, Women, U21, U19, etc. when OddsPapi has upcoming fixture metadata available
 - follow up to 10 teams
+
+Search results are not filtered out just because several teams have similar names. The integration keeps the available matches and tries to make them easier to distinguish.
+
+## Finding the right team
+
+OddsPapi identifies every club and national team with a unique **participant ID**.
+
+You normally do **not** need to find this ID manually. Search for the team by name during setup and select the correct result from the dropdown.
+
+The integration always shows the participant ID and, when possible, enriches the result with metadata from an upcoming fixture.
+
+Examples may look like:
+
+```text
+Manchester United — Premier League, England (ID 35)
+Norway — UEFA competition, International (ID 4475)
+Bodø/Glimt — Eliteserien, Norway (ID 656)
+Example FC [Women] — Women's competition, Norway (ID ...)
+Example FC U21 — U21 competition, England (ID ...)
+```
+
+Known participant IDs used while testing this integration:
+
+| Team | OddsPapi participant ID |
+|---|---:|
+| Manchester United | `35` |
+| Norway national team | `4475` |
+| Bodø/Glimt | `656` |
+
+### Why can several similar teams appear?
+
+OddsPapi can contain multiple participants with similar club or country names, for example:
+
+- senior team
+- women's team
+- U23 / U21 / U20 / U19 / other youth teams
+- reserve teams
+- other provider-specific participants with a similar name
+
+The integration intentionally does **not** hide those results. Instead it:
+
+1. puts the closest name match first
+2. keeps the original OddsPapi participant ID visible
+3. uses upcoming fixture metadata to show tournament/category context when available
+4. adds a `Women`, `U21`, `U19`, etc. label when that information can be derived from the participant or tournament name
+
+If OddsPapi has no upcoming fixture metadata for a participant, the result falls back to:
+
+```text
+Team name (ID 1234)
+```
+
+This avoids guessing.
+
+### Searching with special characters
+
+Team search normalizes common punctuation and Scandinavian characters, so searches such as `Bodo Glimt`, `Bodø/Glimt`, and similar variants are easier to match.
+
+### Finding an ID manually
+
+OddsPapi's participant endpoint for football is:
+
+```text
+GET /v4/participants?sportId=10&language=en
+```
+
+The response is an object where the key is the participant ID and the value is the participant name, for example:
+
+```json
+{
+  "35": "Manchester United",
+  "4475": "Norway",
+  "656": "Bodø/Glimt"
+}
+```
+
+> **Important:** Use the OddsPapi participant ID. It is not the same as a Pinnacle, SofaScore, Flashscore, or other provider ID.
+
+## Bookmaker compatibility
+
+The integration lets you select bookmakers made available by your OddsPapi subscription.
+
+At this stage, the integration has only been **tested and verified with Pinnacle**.
+
+Known working test examples include:
+
+- Manchester United (`35`)
+- Norway national team (`4475`)
+- Bodø/Glimt (`656`)
+
+Other bookmakers may work, but they have not yet been verified with this integration.
+
+If you successfully test another bookmaker, feel free to open an issue or contribute your results.
 
 ## Sensors
 
@@ -72,6 +167,8 @@ Available profiles:
 | Frequent | 1 h | 6 h | 24 h |
 
 The integration also uses one shared short fixture-window lookup where possible before falling back to participant-specific discovery.
+
+Team-search enrichment also uses a shared fixture lookup for the setup session instead of making one request per search result.
 
 ## Fair win probability
 
@@ -120,13 +217,15 @@ If HACS says the repository structure is not compliant, verify that `custom_comp
 
 If **Add Integration** does not find OddsPapi, make sure HACS finished installing the custom component and restart Home Assistant first.
 
+If several similar team names appear, use the displayed tournament/category and participant ID to identify the correct participant. When no context is available, the integration deliberately shows the raw OddsPapi name and ID instead of guessing.
+
 ## Security
 
 The API key is entered through Home Assistant's config flow. Do not commit API keys to GitHub or include them in issues/screenshots.
 
 ## Version
 
-Current development version: **0.1.2**
+Current development version: **0.1.3**
 
 ## License
 
