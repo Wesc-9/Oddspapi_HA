@@ -1,0 +1,29 @@
+{
+  "title": "OddsPapi Sports Odds",
+  "config": {
+    "step": {
+      "user": {"title": "Koble til OddsPapi", "description": "Skriv inn OddsPapi API-nøkkelen.", "data": {"api_key": "API-nøkkel"}},
+      "settings": {"title": "Oddsinnstillinger", "description": "Velg bookmaker og oppdateringsprofil.", "data": {"bookmaker": "Bookmaker", "profile": "Oppdateringsprofil"}},
+      "team_search": {"title": "Legg til fotballag", "description": "Valgt: {selected}\n\nSøk etter klubb- eller landslagsnavn. Maks {max_teams} lag.", "data": {"search": "Søk etter lag", "finish": "Fullfør oppsett"}},
+      "team_pick": {"title": "Velg lag", "data": {"team": "Lag"}},
+      "reauth_confirm": {"title": "Koble til OddsPapi på nytt", "description": "Skriv inn en gyldig OddsPapi API-nøkkel.", "data": {"api_key": "API-nøkkel"}}
+    },
+    "error": {"cannot_connect": "Kunne ikke koble til OddsPapi.", "invalid_auth": "API-nøkkelen ble avvist av OddsPapi.", "participants_failed": "Kunne ikke laste fotballagregisteret.", "select_team": "Velg minst ett lag før du fullfører.", "search_required": "Skriv inn et lagnavn å søke etter.", "no_match": "Fant ingen treff."},
+    "abort": {"already_configured": "Denne OddsPapi-kontoen er allerede konfigurert."}
+  },
+  "options": {
+    "step": {
+      "init": {"title": "OddsPapi-innstillinger", "data": {"action": "Hva vil du endre?"}},
+      "settings": {"title": "Oddsinnstillinger", "data": {"bookmaker": "Bookmaker", "profile": "Oppdateringsprofil"}},
+      "add_team": {"title": "Legg til lag", "data": {"search": "Søk etter lag"}},
+      "add_team_pick": {"title": "Velg lag", "data": {"team": "Lag"}},
+      "remove_team": {"title": "Fjern lag", "data": {"remove_teams": "Lag som skal fjernes"}}
+    },
+    "error": {"cannot_connect": "Kunne ikke koble til OddsPapi.", "participants_failed": "Kunne ikke laste fotballagregisteret.", "no_match": "Fant ingen treff.", "keep_one_team": "Behold minst ett lag i integrasjonen."},
+    "abort": {"max_teams": "Maks antall lag er allerede konfigurert.", "no_teams": "Ingen lag er konfigurert."}
+  },
+  "selector": {
+    "refresh_profile": {"options": {"low": "Lavt forbruk", "balanced": "Balansert", "frequent": "Hyppig"}},
+    "options_action": {"options": {"settings": "Bookmaker og oppdateringsprofil", "add_team": "Legg til lag", "remove_team": "Fjern lag"}}
+  }
+}
