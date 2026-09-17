@@ -1,0 +1,29 @@
+{
+  "title": "OddsPapi Sports Odds",
+  "config": {
+    "step": {
+      "user": {"title": "Connect to OddsPapi", "description": "Enter your OddsPapi API key.", "data": {"api_key": "API key"}},
+      "settings": {"title": "Odds settings", "description": "Choose bookmaker and refresh profile.", "data": {"bookmaker": "Bookmaker", "profile": "Refresh profile"}},
+      "team_search": {"title": "Add football teams", "description": "Selected: {selected}\n\nSearch for a club or national team. Maximum {max_teams} teams.", "data": {"search": "Team search", "finish": "Finish setup"}},
+      "team_pick": {"title": "Choose team", "data": {"team": "Team"}},
+      "reauth_confirm": {"title": "Reconnect OddsPapi", "description": "Enter a valid OddsPapi API key.", "data": {"api_key": "API key"}}
+    },
+    "error": {"cannot_connect": "Could not connect to OddsPapi.", "invalid_auth": "The API key was rejected by OddsPapi.", "participants_failed": "Could not load the football participant directory.", "select_team": "Select at least one team before finishing.", "search_required": "Enter a team name to search for.", "no_match": "No matching team was found."},
+    "abort": {"already_configured": "This OddsPapi account is already configured."}
+  },
+  "options": {
+    "step": {
+      "init": {"title": "OddsPapi options", "data": {"action": "What do you want to change?"}},
+      "settings": {"title": "Odds settings", "data": {"bookmaker": "Bookmaker", "profile": "Refresh profile"}},
+      "add_team": {"title": "Add team", "data": {"search": "Team search"}},
+      "add_team_pick": {"title": "Choose team", "data": {"team": "Team"}},
+      "remove_team": {"title": "Remove teams", "data": {"remove_teams": "Teams to remove"}}
+    },
+    "error": {"cannot_connect": "Could not connect to OddsPapi.", "participants_failed": "Could not load the football participant directory.", "no_match": "No matching team was found.", "keep_one_team": "Keep at least one team in the integration."},
+    "abort": {"max_teams": "The maximum number of teams is already configured.", "no_teams": "No teams are configured."}
+  },
+  "selector": {
+    "refresh_profile": {"options": {"low": "Low usage", "balanced": "Balanced", "frequent": "Frequent"}},
+    "options_action": {"options": {"settings": "Bookmaker and refresh profile", "add_team": "Add team", "remove_team": "Remove team"}}
+  }
+}
