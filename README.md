@@ -225,7 +225,7 @@ The API key is entered through Home Assistant's config flow. Do not commit API k
 
 ## Version
 
-Current development version: **0.1.3**
+Current stable version: **1.0.0**
 
 ## License
 
