@@ -6,7 +6,7 @@ from datetime import timedelta
 
 DOMAIN = "oddspapi"
 NAME = "OddsPapi Sports Odds"
-VERSION = "0.1.3"
+VERSION = "1.0.0"
 
 CONF_API_KEY = "api_key"
 CONF_BOOKMAKER = "bookmaker"
