@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.1
+
+- Improved team selection when OddsPapi returns several participants with the same normalized name.
+- Duplicate-name search results are now enriched before the user selects a team.
+- The dropdown can show tournament, country/category and provider-derived team type such as Women, U23/U21/U20/U19/U18/U17/U16, Youth, Reserves or SRL when OddsPapi fixture metadata exposes it.
+- The selected bookmaker is checked first, so matching results can show that upcoming odds are available for that bookmaker.
+- If the selected bookmaker has no upcoming odds for a duplicate participant, the integration performs a fallback fixture lookup to identify the competition/team type where possible.
+- No participant is hidden or filtered out; the extra information is only used to make the correct participant easier to identify.
+- Search enrichment is cached for the active config/options flow and is capped at 8 fixture requests per flow to protect small OddsPapi quotas.
+- Removed the previous always-on shared fixture lookup from team search; unique-name searches now avoid unnecessary fixture enrichment requests.
+
 ## 1.0.0
 
 - First stable release of OddsPapi Sports Odds for Home Assistant.
